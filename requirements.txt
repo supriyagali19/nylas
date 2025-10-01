@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+nylas
+python-dotenv
+httpx
+motor
+boto3
+opencv-python-headless
+moviepy
