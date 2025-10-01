@@ -19,7 +19,6 @@ class TranscriptionRequest(BaseModel):
 async def transcribe_meeting(
     request: TranscriptionRequest, background_tasks: BackgroundTasks
 ):
-    # This function remains exactly the same
     if not client:
         raise HTTPException(status_code=500, detail="Nylas client not initialized.")
 
@@ -60,7 +59,6 @@ async def get_media_status(notetaker_id: str):
     else:
         return {"status": "processing"}
 
-# The webhook endpoint remains unchanged
 @app.post("/webhook")
 async def nylas_webhook(payload: dict):
     return {"status": "received"}
