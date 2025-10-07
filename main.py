@@ -21,18 +21,7 @@ import pytz # For handling timezones
 class TranscriptionRequest(BaseModel):
     meet_url: str
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Handles application startup and shutdown events.
-    """
-    print("Application startup: Starting scheduler service in the background.")
-    task = asyncio.create_task(run_scheduler_check())
-    yield
-    print("Application shutdown: Stopping scheduler service.")
-    task.cancel()
 
-app = FastAPI(lifespan=lifespan)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
