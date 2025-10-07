@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from nylas.models.errors import NylasApiError
@@ -9,42 +10,119 @@ from s3_uploader import s3_client, AWS_S3_BUCKET_NAME
 from botocore.exceptions import ClientError
 from s3_uploader import delete_folder_from_s3
 from database import delete_media_result
+from scheduler_service import run_scheduler_check
+from nylas.models.events import CreateAutocreate, When, Conferencing, Details
+from nylas.models.events import CreateEventRequest
+from datetime import datetime
+from contextlib import asynccontextmanager
+import pytz # For handling timezones
 
-app = FastAPI()
 
 class TranscriptionRequest(BaseModel):
     meet_url: str
 
-@app.post("/transcribe")
-async def transcribe_meeting(
-    request: TranscriptionRequest, background_tasks: BackgroundTasks
-):
-    # This function remains exactly the same
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles application startup and shutdown events.
+    """
+    print("Application startup: Starting scheduler service in the background.")
+    task = asyncio.create_task(run_scheduler_check())
+    yield
+    print("Application shutdown: Stopping scheduler service.")
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Handles application startup and shutdown events.
+    """
+    print("Application startup: Starting scheduler service in the background.")
+    task = asyncio.create_task(run_scheduler_check())
+    yield
+    print("Application shutdown: Stopping scheduler service.")
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+
+class ScheduleBotRequest(BaseModel):
+    meet_url: str
+    start_date: str # Format: "YYYY-MM-DD"
+    start_time: str # Format: "HH:MM" (24-hour)
+    timezone: str = "Asia/Kolkata"
+
+def get_provider_from_url(url: str) -> str:
+    if "zoom.us" in url:
+        return "Zoom Meeting"
+    elif "teams.microsoft.com" in url or "teams.live.com" in url:
+        return "Microsoft Teams"
+    elif "meet.google.com" in url:
+        return "Google Meet"
+    else:
+        return "unknown"
+
+@app.post("/schedule-bot")
+async def schedule_bot_for_meeting(request: ScheduleBotRequest):
+    """
+    Creates a calendar event to schedule the bot to join a specific meeting at a specific time.
+    The bot will stay until the meeting ends.
+    """
     if not client:
         raise HTTPException(status_code=500, detail="Nylas client not initialized.")
 
-    request_body: InviteNotetakerRequest = {
-        "meeting_link": request.meet_url,
-        "name": "Recording & Transcription Bot",
-        "meeting_settings": {
-            "video_recording": True,
-            "audio_recording": True,
-            "transcription": True,
-        },
-    }
-
     try:
-        notetaker_response = client.notetakers.invite(
-            identifier=NYLAS_GRANT_ID, request_body=request_body
-        )
-        notetaker_id = notetaker_response.data.id
-        background_tasks.add_task(check_and_get_media, notetaker_id, request.meet_url)
-        return {
-            "message": "Recording and transcription started.",
-            "notetaker_id": notetaker_id,
+        # 1. Convert user-provided date and time into Unix timestamps
+        local_tz = pytz.timezone(request.timezone)
+        start_datetime_local = local_tz.localize(datetime.strptime(f"{request.start_date} {request.start_time}", "%Y-%m-%d %H:%M"))
+        start_timestamp = int(start_datetime_local.timestamp())
+        
+        # NEW: Set a default 1-hour duration for the calendar event placeholder
+        end_timestamp = start_timestamp + 3600 # 3600 seconds = 1 hour
+
+        # 2. Get the provider dynamically from the URL
+        provider = get_provider_from_url(request.meet_url)
+
+        # 3. Prepare the request to create a calendar event
+        event_request: CreateEventRequest = {
+            "calendar_id": "primary",
+            "title": f"Automated Recording: {request.meet_url}",
+            "when": {
+                "start_time": start_timestamp,
+                "end_time": end_timestamp, # Use the default end time
+            },
+            "conferencing": {
+                "provider": provider,
+                "details": {
+                    "url": request.meet_url
+                }
+            }
         }
+
+        # 4. Create the event using the Nylas Calendar API
+        created_event_response = client.events.create(
+            identifier=NYLAS_GRANT_ID,
+            request_body=event_request,
+            query_params={"calendar_id": "primary"}
+        )
+        
+        event_id = created_event_response.data.id
+        print(f"✅ Calendar event created with ID: {event_id} for a {provider} meeting.")
+
+        return {
+            "message": "Bot has been scheduled to join the meeting. It will stay until the meeting ends.",
+            "event_id": event_id,
+            "scheduled_for": start_datetime_local.isoformat()
+        }
+
     except NylasApiError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e.provider_error or e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/media/{notetaker_id}")
 async def get_media_status(notetaker_id: str):
